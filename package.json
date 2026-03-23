@@ -5,13 +5,36 @@
   "description": "NKSC (National Cybersecurity Centre of Lithuania) MCP server — cybersecurity guidelines, advisories, and frameworks for Lithuania",
   "type": "module",
   "main": "dist/src/index.js",
-  "bin": { "lithuanian-cybersecurity-mcp": "dist/src/index.js" },
-  "files": ["dist", "server.json"],
-  "engines": { "node": ">=20" },
-  "repository": { "type": "git", "url": "git+https://github.com/Ansvar-Systems/lithuanian-cybersecurity-mcp.git" },
-  "bugs": { "url": "https://github.com/Ansvar-Systems/lithuanian-cybersecurity-mcp/issues" },
+  "bin": {
+    "lithuanian-cybersecurity-mcp": "dist/src/index.js"
+  },
+  "files": [
+    "dist",
+    "server.json"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ansvar-Systems/lithuanian-cybersecurity-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Ansvar-Systems/lithuanian-cybersecurity-mcp/issues"
+  },
   "homepage": "https://github.com/Ansvar-Systems/lithuanian-cybersecurity-mcp#readme",
-  "keywords": ["mcp", "model-context-protocol", "ai", "claude", "nksc", "lithuanian-cybersecurity", "cybersecurity", "lithuania", "compliance", "ansvar"],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai",
+    "claude",
+    "nksc",
+    "lithuanian-cybersecurity",
+    "cybersecurity",
+    "lithuania",
+    "compliance",
+    "ansvar"
+  ],
   "author": "Ansvar Systems AB <hello@ansvar.ai>",
   "license": "Apache-2.0",
   "scripts": {
@@ -19,6 +42,7 @@
     "dev": "tsx src/http-server.ts",
     "start": "node dist/src/http-server.js",
     "seed": "npx tsx scripts/seed-sample.ts",
+    "ingest": "npx tsx scripts/ingest-nksc.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "tsc --noEmit"
   },
@@ -31,6 +55,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
     "better-sqlite3": "^9.4.3",
+    "cheerio": "^1.2.0",
     "zod": "^3.22.4"
   }
 }
