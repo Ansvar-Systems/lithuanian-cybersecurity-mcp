@@ -1,11 +1,38 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "eu.ansvar/lithuanian-cybersecurity-mcp",
-  "description": "Query NKSC (National Cybersecurity Centre of Lithuania) cybersecurity guidelines, advisories, and frameworks",
-  "repository": { "url": "https://github.com/Ansvar-Systems/lithuanian-cybersecurity-mcp", "source": "github" },
+  "description": "NKSC (National Cybersecurity Centre of Lithuania) MCP server — cybersecurity guidelines, advisories, and frameworks for Lithuania",
+  "repository": {
+    "url": "https://github.com/Ansvar-Systems/lithuanian-cybersecurity-mcp",
+    "source": "github"
+  },
   "homepage": "https://ansvar.eu",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "license": "Apache-2.0",
-  "keywords": ["nksc", "lithuanian-cybersecurity", "cybersecurity", "lithuania", "information-security", "compliance", "mcp", "ansvar"],
-  "packages": [{ "registryType": "npm", "identifier": "@ansvar/lithuanian-cybersecurity-mcp", "version": "0.1.0", "transport": { "type": "stdio" } }]
+  "keywords": [
+    "cybersecurity",
+    "lithuania",
+    "regulation",
+    "compliance",
+    "mcp"
+  ],
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@ansvar/lithuanian-cybersecurity-mcp",
+      "version": "1.0.0",
+      "transport": {
+        "type": "stdio"
+      }
+    },
+    {
+      "registryType": "npm",
+      "identifier": "@ansvar/lithuanian-cybersecurity-mcp",
+      "version": "1.0.0",
+      "transport": {
+        "type": "streamable-http",
+        "url": "https://mcp.ansvar.eu/lithuanian-cybersecurity/mcp"
+      }
+    }
+  ]
 }
