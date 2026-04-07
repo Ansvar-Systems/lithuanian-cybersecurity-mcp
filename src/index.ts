@@ -17,6 +17,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { searchGuidance, getGuidance, searchAdvisories, getAdvisory, listFrameworks } from "./db.js";
+import { buildCitation } from "./utils/citation.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -113,9 +114,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     switch (name) {
       case "lt_cyber_search_guidance": { const p = SearchGuidanceArgs.parse(args); const r = searchGuidance({ query: p.query, type: p.type, series: p.series, status: p.status, limit: p.limit }); return textContent({ results: r, count: r.length }); }
-      case "lt_cyber_get_guidance": { const p = GetGuidanceArgs.parse(args); const doc = getGuidance(p.reference); return doc ? textContent(doc) : errorContent(`Guidance document not found: ${p.reference}`); }
+      case "lt_cyber_get_guidance": { const p = GetGuidanceArgs.parse(args); const doc = getGuidance(p.reference); if (!doc) return errorContent(`Guidance document not found: ${p.reference}`); const dr = doc as Record<string, unknown>; return textContent({ ...doc, _citation: buildCitation(String(dr.reference || p.reference), String(dr.title || dr.reference || p.reference), "lt_cyber_get_guidance", { reference: p.reference }, dr.source_url as string | undefined) }); }
       case "lt_cyber_search_advisories": { const p = SearchAdvisoriesArgs.parse(args); const r = searchAdvisories({ query: p.query, severity: p.severity, limit: p.limit }); return textContent({ results: r, count: r.length }); }
-      case "lt_cyber_get_advisory": { const p = GetAdvisoryArgs.parse(args); const a = getAdvisory(p.reference); return a ? textContent(a) : errorContent(`Advisory not found: ${p.reference}`); }
+      case "lt_cyber_get_advisory": { const p = GetAdvisoryArgs.parse(args); const a = getAdvisory(p.reference); if (!a) return errorContent(`Advisory not found: ${p.reference}`); const ar = a as Record<string, unknown>; return textContent({ ...a, _citation: buildCitation(String(ar.reference || p.reference), String(ar.title || ar.reference || p.reference), "lt_cyber_get_advisory", { reference: p.reference }, ar.source_url as string | undefined) }); }
       case "lt_cyber_list_frameworks": { const f = listFrameworks(); return textContent({ frameworks: f, count: f.length }); }
       case "lt_cyber_about": return textContent({ name: SERVER_NAME, version: pkgVersion, description: "NKSC (National Cybersecurity Centre of Lithuania) MCP server. Provides access to Lithuanian cybersecurity guidelines, security advisories, and NIS2 implementation materials.", data_source: "NKSC (https://www.nksc.lt/) and Communications Regulatory Authority — RRT (https://www.rrt.lt/)", coverage: { guidance: "NKSC guidelines, RRT recommendations, NIS2 implementation materials for Lithuania", advisories: "NKSC security advisories and alerts", frameworks: "National cybersecurity frameworks, NIS2 compliance, critical infrastructure protection" }, tools: TOOLS.map(t => ({ name: t.name, description: t.description })) });
       default: return errorContent(`Unknown tool: ${name}`);
