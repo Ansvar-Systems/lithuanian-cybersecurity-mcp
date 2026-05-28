@@ -3,24 +3,34 @@
  * Ingestion crawler for NKSC — Nacionalinis kibernetinio saugumo centras
  * (National Cyber Security Centre of Lithuania) / CERT-LT.
  *
- * Crawls three content streams from nksc.lt and nksc.lrv.lt and inserts into
- * the local better-sqlite3 database used by the Lithuanian Cybersecurity MCP:
+ * The current NKSC sites (`nksc.lrv.lt` and `www.nksc.lt`) sit behind a
+ * Cloudflare browser-challenge that returns HTTP 403 to any non-interactive
+ * client (verified 2026-05-28). Direct crawling is therefore not possible.
  *
- *   1. Naujienos (news / advisories) — nksc.lrv.lt/lt/naujienos/?page=N
- *      Individual articles at /lt/naujienos/<slug>/
+ * This script reads NKSC content from the Internet Archive's Wayback Machine
+ * instead, which has a complete snapshot history (319 news articles, 185
+ * recommendation sub-pages, 320 PDF bulletins as of 2026-05-28).
  *
- *   2. Rekomendacijos (recommendations / guidelines) — www.nksc.lt/rekomendacijos.html
- *      Bulletins and PDF-linked documents from /doc/biuleteniai/
+ * Discovery uses the Wayback CDX API; fetches use the `id_` rewrite-free
+ * snapshot mode so the upstream HTML is returned verbatim (no toolbar / no
+ * URL rewriting in the body).
+ *
+ *   1. Naujienos (news / advisories) — CDX query on www.nksc.lt/naujienos/*
+ *      Individual articles served as /naujienos/<slug>.html via Wayback.
+ *
+ *   2. Rekomendacijos (recommendations / guidelines) — CDX query on
+ *      www.nksc.lt/rekomendacijos/* (sub-pages) and the bulletin index at
+ *      www.nksc.lt/rekomendacijos.html.
  *
  *   3. Aktualūs dokumentai (current information) — www.nksc.lt/aktualu.html
- *      Regulatory info, reports, and current cybersecurity law resources
+ *      Regulatory info, reports, and current cybersecurity law resources.
  *
  * Usage:
  *   npx tsx scripts/ingest-nksc.ts
  *   npx tsx scripts/ingest-nksc.ts --dry-run     # parse without DB writes
  *   npx tsx scripts/ingest-nksc.ts --resume       # skip already-ingested references
  *   npx tsx scripts/ingest-nksc.ts --force        # drop existing data first
- *   npx tsx scripts/ingest-nksc.ts --pages 5      # limit listing pages per stream
+ *   npx tsx scripts/ingest-nksc.ts --limit 50     # cap articles fetched per stream
  *   npx tsx scripts/ingest-nksc.ts --stream news  # crawl only one stream
  *
  * Environment:
@@ -44,11 +54,16 @@ import { SCHEMA_SQL } from "../src/db.js";
 const DB_PATH = process.env["NKSC_DB_PATH"] ?? "data/nksc.db";
 const BASE_LRV = "https://nksc.lrv.lt";
 const BASE_NKSC = "https://www.nksc.lt";
+const WAYBACK_BASE = "https://web.archive.org";
+const WAYBACK_CDX = "https://web.archive.org/cdx/search/cdx";
 const RATE_LIMIT_MS = 1_500;
 const MAX_RETRIES = 3;
 const BACKOFF_BASE_MS = 2_000;
+// Use a browser-shaped User-Agent. Direct NKSC sites are Cloudflare-gated
+// for non-interactive clients (verified 2026-05-28, HTTP 403 with
+// cf-mitigated: challenge); fetches are routed through the Wayback Machine.
 const USER_AGENT =
-  "AnsvarNKSCCrawler/1.0 (+https://github.com/Ansvar-Systems/lithuanian-cybersecurity-mcp)";
+  "Mozilla/5.0 (compatible; AnsvarNKSCCrawler/2.0; +https://github.com/Ansvar-Systems/lithuanian-cybersecurity-mcp)";
 
 const args = process.argv.slice(2);
 const dryRun = args.includes("--dry-run");
@@ -61,7 +76,7 @@ function flagValue(name: string): string | undefined {
   return args[idx + 1];
 }
 
-const maxPages = parseInt(flagValue("--pages") ?? "0", 10) || 0; // 0 = unlimited
+const maxArticles = parseInt(flagValue("--limit") ?? "0", 10) || 0; // 0 = unlimited
 const streamFilter = flagValue("--stream"); // "news" | "recommendations" | "documents"
 
 // ---------------------------------------------------------------------------
@@ -123,6 +138,95 @@ async function fetchPage(url: string): Promise<string> {
   }
 
   throw lastError ?? new Error(`Failed to fetch ${url}`);
+}
+
+// ---------------------------------------------------------------------------
+// Wayback Machine helpers
+// ---------------------------------------------------------------------------
+
+interface CdxRow {
+  urlkey: string;
+  timestamp: string;
+  original: string;
+  mimetype: string;
+  statuscode: string;
+  digest: string;
+  length: string;
+}
+
+/**
+ * Query the Wayback CDX API for snapshots matching a URL pattern.
+ * Returns the most-recent 200/text-html snapshot per unique URL.
+ */
+async function cdxSearch(
+  urlPattern: string,
+  opts: { mimetype?: string; limit?: number } = {},
+): Promise<CdxRow[]> {
+  const params = new URLSearchParams({
+    url: urlPattern,
+    output: "json",
+    "filter": "statuscode:200",
+    collapse: "urlkey",
+  });
+  // CDX accepts multiple filter params — append a second one for mimetype.
+  const extra = opts.mimetype ? `&filter=mimetype:${opts.mimetype}` : "";
+  if (opts.limit) params.set("limit", String(opts.limit));
+
+  const url = `${WAYBACK_CDX}?${params.toString()}${extra}`;
+  log(`  CDX query: ${urlPattern}${opts.mimetype ? ` (${opts.mimetype})` : ""}`);
+
+  const body = await fetchPage(url);
+  let rows: string[][];
+  try {
+    rows = JSON.parse(body) as string[][];
+  } catch (err) {
+    throw new Error(
+      `CDX response is not JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (rows.length === 0) return [];
+
+  // First row is the header.
+  const [header, ...data] = rows;
+  if (!header) return [];
+  const idx = {
+    urlkey: header.indexOf("urlkey"),
+    timestamp: header.indexOf("timestamp"),
+    original: header.indexOf("original"),
+    mimetype: header.indexOf("mimetype"),
+    statuscode: header.indexOf("statuscode"),
+    digest: header.indexOf("digest"),
+    length: header.indexOf("length"),
+  };
+
+  // For each urlkey, keep the latest timestamp (CDX returns oldest-first
+  // when collapse is used, but the same urlkey can appear once per
+  // collapse-key — we still pick the max defensively).
+  const byKey = new Map<string, CdxRow>();
+  for (const r of data) {
+    const row: CdxRow = {
+      urlkey: r[idx.urlkey] ?? "",
+      timestamp: r[idx.timestamp] ?? "",
+      original: r[idx.original] ?? "",
+      mimetype: r[idx.mimetype] ?? "",
+      statuscode: r[idx.statuscode] ?? "",
+      digest: r[idx.digest] ?? "",
+      length: r[idx.length] ?? "",
+    };
+    const prev = byKey.get(row.urlkey);
+    if (!prev || row.timestamp > prev.timestamp) {
+      byKey.set(row.urlkey, row);
+    }
+  }
+
+  return Array.from(byKey.values()).sort((a, b) =>
+    b.timestamp.localeCompare(a.timestamp),
+  );
+}
+
+/** Build a Wayback `id_` (rewrite-free) URL for a given snapshot. */
+function waybackIdUrl(timestamp: string, originalUrl: string): string {
+  return `${WAYBACK_BASE}/web/${timestamp}id_/${originalUrl}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -980,100 +1084,42 @@ async function crawlNewsStream(
   existing: Set<string>,
   stats: CrawlStats,
 ): Promise<void> {
-  log("--- Crawling news stream from nksc.lrv.lt ---");
+  log("--- Crawling news stream via Wayback (www.nksc.lt/naujienos/*) ---");
 
-  // Try the LRV government portal first (cleaner pagination)
-  let currentUrl: string | null = `${BASE_LRV}/lt/naujienos/`;
-  let pageNum = 0;
-  let useFallback = false;
-
-  while (currentUrl) {
-    pageNum++;
-    if (maxPages > 0 && pageNum > maxPages) {
-      log(`  Reached page limit (${maxPages}), stopping news stream`);
-      break;
-    }
-
-    log(`  Fetching listing page ${pageNum}: ${currentUrl}`);
-    let html: string;
-    try {
-      html = await fetchPage(currentUrl);
-      stats.listingPagesFetched++;
-    } catch (err) {
-      log(
-        `  Failed to fetch listing page: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      stats.errors++;
-
-      // On first page failure, try fallback to www.nksc.lt
-      if (pageNum === 1) {
-        log("  Switching to fallback: www.nksc.lt/naujienos/");
-        useFallback = true;
-        break;
-      }
-      break;
-    }
-
-    const { entries, hasNext, nextUrl } = parseNewsListingPage(html, currentUrl);
-    log(`  Found ${entries.length} entries on page ${pageNum}`);
-
-    if (entries.length === 0) {
-      // If first page returns 0, try fallback
-      if (pageNum === 1) {
-        log("  No entries found on LRV portal, switching to www.nksc.lt fallback");
-        useFallback = true;
-        break;
-      }
-      log("  No entries found, stopping");
-      break;
-    }
-
-    await processArticleEntries(db, entries, existing, stats);
-
-    currentUrl = hasNext ? nextUrl : null;
+  let rows: CdxRow[];
+  try {
+    rows = await cdxSearch("www.nksc.lt/naujienos/*", {
+      mimetype: "text/html",
+    });
+    stats.listingPagesFetched++;
+  } catch (err) {
+    log(
+      `  CDX query failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    stats.errors++;
+    return;
   }
 
-  // Fallback: crawl www.nksc.lt/naujienos/ with psl_N.html pagination
-  if (useFallback) {
-    let fallbackUrl: string | null = `${BASE_NKSC}/naujienos/psl_1.html`;
-    let fallbackPage = 0;
+  // Drop the listing root and pagination pages (`psl_N.html`).
+  const articles = rows.filter((r) => {
+    const u = r.original;
+    if (/\/naujienos\/?$/.test(u)) return false;
+    if (/\/naujienos\.html$/.test(u)) return false;
+    if (/\/naujienos\/psl_\d+\.html$/.test(u)) return false;
+    return /\/naujienos\/[^/]+\.html$/.test(u);
+  });
 
-    while (fallbackUrl) {
-      fallbackPage++;
-      if (maxPages > 0 && fallbackPage > maxPages) {
-        log(`  Reached page limit (${maxPages}), stopping fallback stream`);
-        break;
-      }
+  log(`  CDX returned ${rows.length} rows; ${articles.length} are article URLs`);
 
-      log(`  Fetching fallback listing page ${fallbackPage}: ${fallbackUrl}`);
-      let html: string;
-      try {
-        html = await fetchPage(fallbackUrl);
-        stats.listingPagesFetched++;
-      } catch (err) {
-        log(
-          `  Failed to fetch fallback listing: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        stats.errors++;
-        break;
-      }
+  const limit = maxArticles > 0 ? Math.min(maxArticles, articles.length) : articles.length;
+  const entries: ListingEntry[] = articles.slice(0, limit).map((r) => ({
+    url: waybackIdUrl(r.timestamp, r.original),
+    title: "", // resolved on article fetch
+    dateRaw: "",
+    summary: "",
+  }));
 
-      const { entries, hasNext, nextUrl } = parseNkscNewsListingPage(
-        html,
-        fallbackUrl,
-      );
-      log(`  Found ${entries.length} entries on fallback page ${fallbackPage}`);
-
-      if (entries.length === 0) {
-        log("  No entries found, stopping fallback");
-        break;
-      }
-
-      await processArticleEntries(db, entries, existing, stats);
-
-      fallbackUrl = hasNext ? nextUrl : null;
-    }
-  }
+  await processArticleEntries(db, entries, existing, stats);
 }
 
 async function processArticleEntries(
@@ -1181,22 +1227,66 @@ async function crawlRecommendations(
   existing: Set<string>,
   stats: CrawlStats,
 ): Promise<void> {
-  log("--- Crawling recommendations from www.nksc.lt/rekomendacijos.html ---");
+  log("--- Crawling recommendations via Wayback ---");
 
-  let html: string;
+  // Pass 1: the rekomendacijos.html index lists bulletin PDFs in /doc/.
+  // Fetch the most recent snapshot of the index and parse its <a href> set.
+  const recommendations: RecommendationEntry[] = [];
   try {
-    html = await fetchPage(`${BASE_NKSC}/rekomendacijos.html`);
-    stats.listingPagesFetched++;
+    const idxRows = await cdxSearch("www.nksc.lt/rekomendacijos.html", {
+      mimetype: "text/html",
+      limit: 5,
+    });
+    const idxRow = idxRows[0];
+    if (idxRow) {
+      const html = await fetchPage(
+        waybackIdUrl(idxRow.timestamp, idxRow.original),
+      );
+      stats.listingPagesFetched++;
+      // Strip Wayback's `/web/<ts>/` link rewrites so the parser sees plain
+      // upstream hrefs. We already used `id_` mode which leaves the body
+      // un-rewritten, but parseRecommendationsPage builds URLs from BASE_NKSC
+      // and is already correct.
+      const parsed = parseRecommendationsPage(html);
+      recommendations.push(...parsed);
+      log(`  Index page yielded ${parsed.length} recommendations`);
+    } else {
+      log("  No Wayback snapshot of rekomendacijos.html — skipping index");
+    }
   } catch (err) {
     log(
-      `  Failed to fetch recommendations page: ${err instanceof Error ? err.message : String(err)}`,
+      `  Failed to fetch recommendations index: ${err instanceof Error ? err.message : String(err)}`,
     );
     stats.errors++;
-    return;
   }
 
-  const recommendations = parseRecommendationsPage(html);
-  log(`  Found ${recommendations.length} recommendations`);
+  // Pass 2: every archived /rekomendacijos/<slug>.html sub-page is an
+  // independent recommendation card. Treat them as PDF-less recommendations
+  // (title comes from the URL slug; full text is fetched per article).
+  try {
+    const subRows = await cdxSearch("www.nksc.lt/rekomendacijos/*", {
+      mimetype: "text/html",
+    });
+    log(`  Found ${subRows.length} recommendation sub-pages in CDX`);
+    for (const r of subRows) {
+      const slugMatch = r.original.match(/\/rekomendacijos\/([^/?]+?)\.html$/);
+      if (!slugMatch) continue;
+      const slug = slugMatch[1] ?? "";
+      const title = slug.replace(/[_-]+/g, " ").trim();
+      if (!title) continue;
+      const url = waybackIdUrl(r.timestamp, r.original);
+      if (!recommendations.some((e) => e.url === url)) {
+        recommendations.push({ title, url, isPdf: false });
+      }
+    }
+  } catch (err) {
+    log(
+      `  Failed to query recommendation sub-pages: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    stats.errors++;
+  }
+
+  log(`  Total recommendations to insert: ${recommendations.length}`);
 
   for (const rec of recommendations) {
     const slug = rec.title
@@ -1240,11 +1330,20 @@ async function crawlDocuments(
   existing: Set<string>,
   stats: CrawlStats,
 ): Promise<void> {
-  log("--- Crawling documents from www.nksc.lt/aktualu.html ---");
+  log("--- Crawling documents via Wayback (www.nksc.lt/aktualu.html) ---");
 
   let html: string;
   try {
-    html = await fetchPage(`${BASE_NKSC}/aktualu.html`);
+    const rows = await cdxSearch("www.nksc.lt/aktualu.html", {
+      mimetype: "text/html",
+      limit: 5,
+    });
+    const row = rows[0];
+    if (!row) {
+      log("  No Wayback snapshot for aktualu.html");
+      return;
+    }
+    html = await fetchPage(waybackIdUrl(row.timestamp, row.original));
     stats.listingPagesFetched++;
   } catch (err) {
     log(
@@ -1302,7 +1401,7 @@ async function main(): Promise<void> {
   log("NKSC / CERT-LT ingestion crawler starting");
   log(`  Database: ${DB_PATH}`);
   log(
-    `  Flags: ${[dryRun && "--dry-run", resume && "--resume", force && "--force", maxPages && `--pages ${maxPages}`, streamFilter && `--stream ${streamFilter}`].filter(Boolean).join(", ") || "(none)"}`,
+    `  Flags: ${[dryRun && "--dry-run", resume && "--resume", force && "--force", maxArticles && `--limit ${maxArticles}`, streamFilter && `--stream ${streamFilter}`].filter(Boolean).join(", ") || "(none)"}`,
   );
 
   const db = dryRun ? null : initDb();
